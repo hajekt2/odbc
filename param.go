@@ -139,27 +139,15 @@ func (p *Parameter) BindValue(h api.SQLHSTMT, idx int, v driver.Value, conn *Con
 		size = 20 + api.SQLULEN(decimal)
 	case []byte:
 		ctype = api.SQL_C_BINARY
-		b := make([]byte, len(d))
-		copy(b, d)
-		p.Data = b
+		sqltype, size = p.binaryBinding(d, conn.isMSAccessDriver)
+		b := p.Data.([]byte)
 		if len(d) > 0 {
 			buf = unsafe.Pointer(&b[0])
 		} else {
 			buf = nil
 		}
 		buflen = api.SQLLEN(len(b))
-		plen = p.StoreStrLen_or_IndPtr(buflen)
-		size = api.SQLULEN(len(b))
-		switch {
-		case p.isDescribed:
-			sqltype = p.SQLType
-		case size <= 0:
-			sqltype = api.SQL_LONGVARBINARY
-		case size >= 8000:
-			sqltype = api.SQL_LONGVARBINARY
-		default:
-			sqltype = api.SQL_BINARY
-		}
+		plen = &p.StrLen_or_IndPtr
 	default:
 		return fmt.Errorf("unsupported type %T", v)
 	}
@@ -170,6 +158,39 @@ func (p *Parameter) BindValue(h api.SQLHSTMT, idx int, v driver.Value, conn *Con
 		return NewError("SQLBindParameter", h)
 	}
 	return nil
+}
+
+// binaryBinding prepares an owned byte buffer and its binding metadata.
+// Access defaults short binary declarations to 510 bytes; OLE uses LONGVARBINARY.
+// Prefer a described short-binary size, otherwise use that conservative boundary.
+// https://learn.microsoft.com/en-us/sql/odbc/microsoft/microsoft-access-data-types
+func (p *Parameter) binaryBinding(value []byte, isAccess bool) (api.SQLSMALLINT, api.SQLULEN) {
+	b := make([]byte, len(value))
+	copy(b, value)
+	p.Data = b
+	p.StoreStrLen_or_IndPtr(api.SQLLEN(len(b)))
+	size := api.SQLULEN(len(b))
+	var sqltype api.SQLSMALLINT
+	accessLimit := api.SQLULEN(510)
+	if p.isDescribed && (p.SQLType == api.SQL_BINARY || p.SQLType == api.SQL_VARBINARY) && p.Size > 0 {
+		accessLimit = p.Size
+	}
+	switch {
+	case isAccess && ((p.isDescribed && p.SQLType == api.SQL_LONGVARBINARY) || size > accessLimit):
+		sqltype = api.SQL_LONGVARBINARY
+	case p.isDescribed:
+		sqltype = p.SQLType
+	case size == 0 || size >= 8000:
+		sqltype = api.SQL_LONGVARBINARY
+	default:
+		sqltype = api.SQL_BINARY
+	}
+	// ColumnSize is precision, not the payload length or NULL indicator.
+	// Access rejects zero precision even for a valid empty binary value.
+	if isAccess && size == 0 {
+		size = 1
+	}
+	return sqltype, size
 }
 
 func ExtractParameters(h api.SQLHSTMT) ([]Parameter, error) {
