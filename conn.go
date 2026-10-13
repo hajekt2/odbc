@@ -67,6 +67,22 @@ func (c *Conn) Close() (err error) {
 	return err
 }
 
+// WithHandle runs fn with this connection's native ODBC handle. It permits
+// catalog calls such as SQLTables without opening a second connection.
+// Call it inside database/sql.Conn.Raw so database/sql serializes access.
+// The handle is borrowed: fn must not retain, disconnect or free it, change
+// transaction state, or leave statement handles/cursors open when it returns.
+// WithHandle never opens a connection and does not change handle ownership.
+func (c *Conn) WithHandle(fn func(api.SQLHDBC) error) error {
+	if c.bad || c.h == api.SQLHDBC(api.SQL_NULL_HDBC) {
+		return driver.ErrBadConn
+	}
+	if fn == nil {
+		return errors.New("odbc: WithHandle requires a callback")
+	}
+	return fn(c.h)
+}
+
 func (c *Conn) newError(apiName string, handle interface{}) error {
 	err := NewError(apiName, handle)
 	if err == driver.ErrBadConn {
